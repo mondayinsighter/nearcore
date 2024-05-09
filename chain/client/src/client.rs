@@ -46,7 +46,7 @@ use near_chunks::logic::{
     cares_about_shard_this_or_next_epoch, decode_encoded_chunk,
     get_shards_cares_about_this_or_next_epoch, persist_chunk,
 };
-use near_chunks::ShardsManager;
+use near_chunks::shards_manager_actor::ShardsManagerActor;
 use near_client_primitives::debug::ChunkProduction;
 use near_client_primitives::types::{
     format_shard_sync_phase_per_shard, Error, ShardSyncDownload, ShardSyncStatus,
@@ -89,6 +89,9 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use tracing::{debug, debug_span, error, info, trace, warn};
 
+#[cfg(feature = "test_features")]
+use crate::client_actions::AdvProduceChunksMode;
+
 const NUM_REBROADCAST_BLOCKS: usize = 30;
 
 /// The time we wait for the response to a Epoch Sync request before retrying
@@ -117,6 +120,8 @@ pub struct Client {
     /// behaviour on chain.
     #[cfg(feature = "test_features")]
     pub adv_produce_blocks: Option<AdvProduceBlocksMode>,
+    #[cfg(feature = "test_features")]
+    pub adv_produce_chunks: Option<AdvProduceChunksMode>,
     #[cfg(feature = "test_features")]
     pub produce_invalid_chunks: bool,
     #[cfg(feature = "test_features")]
@@ -367,6 +372,8 @@ impl Client {
         Ok(Self {
             #[cfg(feature = "test_features")]
             adv_produce_blocks: None,
+            #[cfg(feature = "test_features")]
+            adv_produce_chunks: None,
             #[cfg(feature = "test_features")]
             produce_invalid_chunks: false,
             #[cfg(feature = "test_features")]
@@ -888,7 +895,7 @@ impl Client {
         #[cfg(feature = "test_features")]
         let gas_used = if self.produce_invalid_chunks { gas_used + 1 } else { gas_used };
         let congestion_info = chunk_extra.congestion_info().unwrap_or_default();
-        let (encoded_chunk, merkle_paths) = ShardsManager::create_encoded_shard_chunk(
+        let (encoded_chunk, merkle_paths) = ShardsManagerActor::create_encoded_shard_chunk(
             prev_block_hash,
             *chunk_extra.state_root(),
             *chunk_extra.outcome_root(),
@@ -1711,6 +1718,16 @@ impl Client {
             ?validator_id,
             block_height = block.header().height())
         .entered();
+
+        #[cfg(feature = "test_features")]
+        match self.adv_produce_chunks {
+            Some(AdvProduceChunksMode::StopProduce) => {
+                tracing::info!(target: "adversary", "skipping chunk production due to adversary configuration");
+                return;
+            }
+            _ => {}
+        };
+
         let epoch_id =
             self.epoch_manager.get_epoch_id_from_prev_block(block.header().hash()).unwrap();
         for shard_id in self.epoch_manager.shard_ids(&epoch_id).unwrap() {

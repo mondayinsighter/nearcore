@@ -7,11 +7,11 @@ use super::peer_manager_mock::PeerManagerMock;
 use crate::stateless_validation::partial_witness::partial_witness_actor::{
     PartialWitnessActor, PartialWitnessSenderForClient,
 };
-use crate::{start_view_client, Client, ClientActor, SyncAdapter, SyncStatus, ViewClientActor};
+use crate::{Client, ClientActor, SyncAdapter, SyncStatus, ViewClientActor, ViewClientActorInner};
 use actix::{Actor, Addr, AsyncContext, Context};
 use futures::{future, FutureExt};
 use near_async::actix::AddrWithAutoSpanContextExt;
-use near_async::actix_wrapper::spawn_actix_actor;
+use near_async::actix_wrapper::{spawn_actix_actor, ActixWrapper};
 use near_async::messaging::{noop, CanSend, IntoMultiSender, IntoSender, LateBoundSender, Sender};
 use near_async::time::{Clock, Duration, Instant, Utc};
 use near_chain::rayon_spawner::RayonAsyncComputationSpawner;
@@ -24,9 +24,8 @@ use near_chain_configs::{
 };
 use near_chunks::adapter::ShardsManagerRequestFromClient;
 use near_chunks::client::ShardsManagerResponse;
-use near_chunks::shards_manager_actor::start_shards_manager;
+use near_chunks::shards_manager_actor::{start_shards_manager, ShardsManagerActor};
 use near_chunks::test_utils::SynchronousShardsManagerAdapter;
-use near_chunks::ShardsManager;
 use near_crypto::{KeyType, PublicKey};
 use near_epoch_manager::shard_tracker::{ShardTracker, TrackedConfig};
 use near_epoch_manager::EpochManagerAdapter;
@@ -131,7 +130,7 @@ pub fn setup(
     let genesis_block = chain.get_block(&chain.genesis().hash().clone()).unwrap();
 
     let signer = Arc::new(create_test_signer(account_id.as_str()));
-    let telemetry = TelemetryActor::default().start();
+    let telemetry = ActixWrapper::new(TelemetryActor::default()).start();
     let config = {
         let mut base = ClientConfig::test(
             skip_sync_wait,
@@ -149,7 +148,7 @@ pub fn setup(
 
     let adv = crate::adversarial::Controls::default();
 
-    let view_client_addr = start_view_client(
+    let view_client_addr = ViewClientActorInner::spawn_actix_actor(
         clock.clone(),
         Some(signer.validator_id().clone()),
         chain_genesis.clone(),
@@ -212,7 +211,7 @@ pub fn setup(
         PeerId::new(PublicKey::empty(KeyType::ED25519)),
         network_adapter,
         Some(signer),
-        telemetry,
+        telemetry.with_auto_span_context().into_sender(),
         ctx,
         None,
         adv,
@@ -282,7 +281,7 @@ pub fn setup_only_view(
     .unwrap();
 
     let signer = Arc::new(create_test_signer(account_id.as_str()));
-    TelemetryActor::default().start();
+    ActixWrapper::new(TelemetryActor::default()).start();
     let config = ClientConfig::test(
         skip_sync_wait,
         min_block_prod_time,
@@ -296,7 +295,7 @@ pub fn setup_only_view(
 
     let adv = crate::adversarial::Controls::default();
 
-    start_view_client(
+    ViewClientActorInner::spawn_actix_actor(
         clock,
         Some(signer.validator_id().clone()),
         chain_genesis,
@@ -1053,7 +1052,7 @@ pub fn setup_synchronous_shards_manager(
     .unwrap();
     let chain_head = chain.head().unwrap();
     let chain_header_head = chain.header_head().unwrap();
-    let shards_manager = ShardsManager::new(
+    let shards_manager = ShardsManagerActor::new(
         clock,
         account_id,
         epoch_manager,
@@ -1063,6 +1062,7 @@ pub fn setup_synchronous_shards_manager(
         chain.chain_store().new_read_only_chunks_store(),
         chain_head,
         chain_header_head,
+        Duration::hours(1),
     );
     SynchronousShardsManagerAdapter::new(shards_manager)
 }

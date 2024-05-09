@@ -12,14 +12,12 @@ use near_chain::ChainGenesis;
 use near_chain_configs::{ClientConfig, Genesis, GenesisConfig, GenesisRecords};
 use near_chunks::adapter::ShardsManagerRequestFromClient;
 use near_chunks::client::ShardsManagerResponse;
+use near_chunks::shards_manager_actor::ShardsManagerActor;
 use near_chunks::test_loop::forward_client_request_to_shards_manager;
-use near_chunks::ShardsManager;
 use near_client::client_actions::{
     ClientActions, ClientSenderForClientMessage, SyncJobsSenderForClientMessage,
 };
-use near_client::sync_jobs_actor::{
-    ClientSenderForSyncJobsMessage, SyncJobsActor, SyncJobsSenderForSyncJobsMessage,
-};
+use near_client::sync_jobs_actor::{ClientSenderForSyncJobsMessage, SyncJobsActor};
 use near_client::test_utils::test_loop::client_actions::{
     forward_client_messages_from_client_to_client_actions,
     forward_client_messages_from_shards_manager,
@@ -51,7 +49,7 @@ struct TestData {
     pub dummy: (),
     pub client: ClientActions,
     pub sync_jobs: SyncJobsActor,
-    pub shards_manager: ShardsManager,
+    pub shards_manager: ShardsManagerActor,
 }
 
 impl AsMut<TestData> for TestData {
@@ -67,12 +65,12 @@ enum TestEvent {
     Adhoc(AdhocEvent<TestData>),
     AsyncComputation(TestLoopAsyncComputationEvent),
     ClientDelayedActions(TestLoopDelayedActionEvent<ClientActions>),
+    SyncJobsDelayedActions(TestLoopDelayedActionEvent<SyncJobsActor>),
     ClientEventFromNetwork(ClientSenderForNetworkMessage),
     ClientEventFromClient(ClientSenderForClientMessage),
     ClientEventFromSyncJobs(ClientSenderForSyncJobsMessage),
     ClientEventFromShardsManager(ShardsManagerResponse),
     SyncJobsEventFromClient(SyncJobsSenderForClientMessage),
-    SyncJobsEventFromSyncJobs(SyncJobsSenderForSyncJobsMessage),
     ShardsManagerRequestFromClient(ShardsManagerRequestFromClient),
     ClientEventFromStateSyncAdapter(SyncMessage),
 }
@@ -84,7 +82,6 @@ fn test_client_with_simple_test_loop() {
     let builder = TestLoopBuilder::<TestEvent>::new();
     let sync_jobs_actor = SyncJobsActor::new(
         builder.sender().into_wrapped_multi_sender::<ClientSenderForSyncJobsMessage, _>(),
-        builder.sender().into_wrapped_multi_sender::<SyncJobsSenderForSyncJobsMessage, _>(),
     );
     let client_config = ClientConfig::test(
         true,
@@ -192,7 +189,7 @@ fn test_client_with_simple_test_loop() {
     )
     .unwrap();
 
-    let shards_manager = ShardsManager::new(
+    let shards_manager = ShardsManagerActor::new(
         builder.clock(),
         Some(accounts[0].clone()),
         epoch_manager,
@@ -202,6 +199,7 @@ fn test_client_with_simple_test_loop() {
         ReadOnlyChunksStore::new(store),
         client.chain.head().unwrap(),
         client.chain.header_head().unwrap(),
+        Duration::milliseconds(100),
     );
 
     let client_actions = ClientActions::new(
@@ -229,8 +227,10 @@ fn test_client_with_simple_test_loop() {
     test.register_handler(forward_client_messages_from_sync_jobs_to_client_actions().widen());
     test.register_handler(forward_client_messages_from_shards_manager().widen());
     test.register_handler(
-        forward_messages_from_client_to_sync_jobs_actor(test.sender().into_future_spawner())
-            .widen(),
+        forward_messages_from_client_to_sync_jobs_actor(
+            test.sender().into_delayed_action_runner(test.shutting_down()),
+        )
+        .widen(),
     );
     test.register_handler(drive_futures().widen());
     test.register_handler(handle_adhoc_events::<TestData>().widen());
